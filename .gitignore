@@ -1,0 +1,60 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# NuGet
+*.nupkg
+packages/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+_*.ps1
+
+# Generated PDFs (keep only template)
+D100_*.pdf
+D710_*.pdf
+
+# Large binaries / installers
+*.exe
+*.msi
+
+# Extracted XML files (can be regenerated)
+template_xfa.xml
+form_xfa.xml
+structura_xfa.xml
+date_xfa.xml
+date_xfa_import.xml
+
+# FDF/XFDF files
+*.fdf
+*.xfdf
+
+# Generated XML output
+D100.xml
+D710.xml
+Erori.txt
+
+# User data (use .example.json as template)
+date_declaratie.json
+
+# Development scripts
+import_xfa.ps1
+import_xfa.vbs
+import_data.js
+
+# Notes / debug files
+campuri_anaf.txt
+gen_xml.txt
+
+# Original ANAF PDFs (users should download from ANAF)
+decl100.pdf
+dclUnica*.pdf
