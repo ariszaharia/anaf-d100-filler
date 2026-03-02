@@ -2,23 +2,22 @@ using System.Text.Json;
 using System.Xml.Linq;
 using System.Text;
 using System.IO;
-using System.Diagnostics;
 using iText.Kernel.Pdf;
 using iText.Forms;
 using iText.Forms.Xfa;
+using iText.Kernel.Pdf.Filespec;
 
-// === XFA FORM FILLER - APASĂ BUTONUL VALIDARE REAL VIA ACROBAT ===
+
+// inputuri + output
 
 string fisierPdf = Path.GetFullPath("decl100.pdf");
 string fisierJson = "date_declaratie.json";
-string fisierTemp = Path.GetFullPath($"D100_Temp_{DateTime.Now:HHmmss}.pdf");
-string fisierFinal = Path.GetFullPath($"D100_VALIDAT_{DateTime.Now:HHmmss}.pdf");
+string fisierOutput = Path.GetFullPath($"D100_COMPLETAT_{DateTime.Now:yyyyMMdd_HHmmss}.pdf");
 
-Console.WriteLine(">>> XFA Form Filler - Apăsare Reală VALIDARE");
-Console.WriteLine("    1. Completează XFA cu iText7");
-Console.WriteLine("    2. Apasă VALIDARE cu UI Automation (click real)\n");
 
-// === DEFINIREA OBLIGAȚIILOR (vec2 din JavaScript) ===
+// simulare buton creanta fiscala (toate variantele posbile)
+// cod fiscal - cod bugetar - model scandenta(formula calcul scadenta)
+
 var obligatii = new Dictionary<string, (string CodBugetar, string Model)>
 {
     { "708", ("5508XXXXXX", "LUNAR_25U") },
@@ -58,7 +57,7 @@ var obligatii = new Dictionary<string, (string CodBugetar, string Model)>
     { "211", ("20A140205X", "FREE") },
     { "216", ("20A140208X", "FREE") },
     { "212", ("20A140203X", "FREE") },
-    { "217", ("20A140207X", "FREE") },
+    { "217", ("20A140207X", "FREE") },  
     { "213", ("20A140204X", "FREE") },
     { "214", ("20A140202X", "FREE") },
     { "215", ("20A140201X", "FREE") },
@@ -138,7 +137,11 @@ var obligatii = new Dictionary<string, (string CodBugetar, string Model)>
     { "247", ("20A140310X", "FREE") },
 };
 
-// 1. CITEȘTE JSON CONFIG
+
+
+//preiau datele din Json sau creez un set de date default 
+//daca nu exista
+
 Dictionary<string, object> date;
 
 if (File.Exists(fisierJson))
@@ -147,6 +150,8 @@ if (File.Exists(fisierJson))
     var jsonText = File.ReadAllText(fisierJson);
     date = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonText) ?? new();
 }
+
+//date default pt testare rapida
 else
 {
     date = new Dictionary<string, object>
@@ -169,325 +174,169 @@ else
         { "sub2_Functia", "Administrator" },
     };
     File.WriteAllText(fisierJson, JsonSerializer.Serialize(date, new JsonSerializerOptions { WriteIndented = true }));
-    Console.WriteLine($"[1/5] Creat: {fisierJson}");
 }
 
-Console.WriteLine($"      {date.Count} câmpuri\n");
 
-// 2. SIMULARE BUTON "ALEGE CREANȚA FISCALĂ"
-Console.WriteLine("[2/5] Simulez butonul 'Alege creanța fiscală'...\n");
+
+// extrag datele din json (cod impozit, luna, an, tip declaratie)
 
 string codImpFull = GetVal(date, "subB_COD_IMP", "");
-int luna_r = int.Parse(GetVal(date, "sub1_luna_r", "1"));
+int luna_r = int.Parse(GetVal(date, "sub1_luna_r", "1")); 
 int an_r = int.Parse(GetVal(date, "sub1_an_r", "2026"));
 string tipD = GetVal(date, "sub1_tipD", "1");
 
 string codImpNumeric = codImpFull.Split('-')[0].Trim();
 
-Console.WriteLine($"      COD_IMP: {codImpFull}");
-Console.WriteLine($"      Cod numeric: {codImpNumeric}");
-Console.WriteLine($"      Perioada: {luna_r:D2}/{an_r}");
+
 
 string codBugetar = "";
 string scadenta = "";
 string model = "";
 
+
+// simulare buton creanta fiscala
 if (obligatii.TryGetValue(codImpNumeric, out var ob))
 {
     codBugetar = ob.CodBugetar;
     model = ob.Model;
+
+    //calc scadenta in functie de model, luna_r, an_r
     scadenta = CalculeazaScadenta(model, luna_r, an_r);
     
     Console.WriteLine($"      COD_BUGETAR: {codBugetar}");
     Console.WriteLine($"      SCADENTA: {scadenta}");
 }
+//generez XML cu datele din json
+
+string xmlD100 = GenereazaXmlD100(date, codImpNumeric, codBugetar, scadenta, luna_r, an_r, tipD);
+string xmlFileName = tipD == "1" ? "D100.xml" : "D710.xml";
+
+//salvare XML local pt debug ('xmlD100')
+string xmlPath = Path.Combine(Path.GetDirectoryName(fisierOutput)!, xmlFileName);
+File.WriteAllText(xmlPath, xmlD100, Encoding.UTF8);
 
 try
 {
-    // 3. COMPLETEAZĂ PDF CU ITEXT7
-    Console.WriteLine("\n[3/5] Completez PDF-ul cu iText7 (append mode)...");
+    //deschid PDF, actulizez datele in XFA, atasez XML si salvez ca PDF nou
     
-    using (var reader = new PdfReader(fisierPdf))
-    using (var writer = new PdfWriter(fisierTemp))
+    using var reader = new PdfReader(fisierPdf);
+    using var writer = new PdfWriter(fisierOutput);
+    
+    var stampProps = new StampingProperties();
+    stampProps.UseAppendMode(); //!!!!!!!!!fortez pastrarea structurii initiale(evita rescriere completa)
+    //!!!!!!!!!!!!!!!!!!!!!!!!!
+    
+    using var pdfDoc = new PdfDocument(reader, writer, stampProps); //sursa , destinatie, reguli scriere
+    
+    var acroForm = PdfAcroForm.GetAcroForm(pdfDoc, false);
+    var xfa = acroForm?.GetXfaForm();
+    
+    if (xfa == null || !xfa.IsXfaPresent())
     {
-        var stampProps = new StampingProperties();
-        stampProps.UseAppendMode();
-        
-        using var pdfDoc = new PdfDocument(reader, writer, stampProps);
-        
-        var acroForm = PdfAcroForm.GetAcroForm(pdfDoc, false);
-        var xfa = acroForm?.GetXfaForm();
-        
-        if (xfa == null || !xfa.IsXfaPresent())
-        {
-            Console.WriteLine("EROARE: Nu s-a găsit XFA!");
-            return;
-        }
-        
-        Console.WriteLine("      XFA găsit. Append mode activ.");
-        
-        var domDoc = xfa.GetDomDocument();
-        using var ms = new MemoryStream();
-        domDoc!.Save(ms);
-        ms.Position = 0;
-        var xDoc = XDocument.Load(ms);
-        
-        var form1 = xDoc.Descendants("form1").FirstOrDefault();
-        if (form1 == null) { Console.WriteLine("EROARE: Nu s-a găsit form1!"); return; }
-        
-        int updated = 0;
-        
-        // SUB1
-        var sub1 = form1.Element("sub1");
-        if (sub1 != null)
-        {
-            updated += UpdateElement(sub1, "tipD", tipD);
-            updated += UpdateElement(sub1, "luna_r", luna_r.ToString());
-            updated += UpdateElement(sub1, "an_r", an_r.ToString());
-            updated += UpdateOrCreate(sub1, "d_anulare", "0");
-            updated += UpdateOrCreate(sub1, "d_succ", "0");
-            updated += UpdateOrCreate(sub1, "d_dizolv", "0");
-            updated += UpdateOrCreate(sub1, "d_modif", "0");
-        }
-        
-        // SUBA
-        var subA = form1.Element("subA");
-        if (subA != null)
-        {
-            updated += UpdateElement(subA, "cif", GetVal(date, "subA_cif", ""));
-            updated += UpdateElement(subA, "DENUMIRE", GetVal(date, "subA_DENUMIRE", ""));
-            updated += UpdateElement(subA, "ADRESA", GetVal(date, "subA_ADRESA", ""));
-            updated += UpdateElement(subA, "text_telefon", GetVal(date, "subA_text_telefon", ""));
-            updated += UpdateElement(subA, "text_email", GetVal(date, "subA_text_email", ""));
-        }
-        
-        // SUBB - Obligația
-        var subB = form1.Element("subB");
-        if (subB != null)
-        {
-            updated += UpdateElement(subB, "COD_IMP", codImpFull);
-            updated += UpdateOrCreate(subB, "COD_BUGETAR", codBugetar);
-            updated += UpdateOrCreate(subB, "SCADENTA", scadenta);
-            updated += UpdateOrCreate(subB, "SCADENTA2", scadenta);
-            updated += UpdateElement(subB, "SUMA01I", GetVal(date, "subB_SUMA01I", "0"));
-            updated += UpdateOrCreate(subB, "SUMA02I", "0");
-            updated += UpdateOrCreate(subB, "SUMA03I", GetVal(date, "subB_SUMA01I", "0"));
-            updated += UpdateOrCreate(subB, "SUMA04I", "0");
-        }
-        
-        // SUME TOTALE
-        updated += UpdateElement(form1, "SUMA1", GetVal(date, "SUMA1", ""));
-        updated += UpdateElement(form1, "SUMA2", GetVal(date, "SUMA2", ""));
-        updated += UpdateElement(form1, "SUMA0", GetVal(date, "SUMA0", ""));
-        
-        // IDENT_IMP
-        var identImp = form1.Element("ident_IMP");
-        if (identImp != null)
-        {
-            updated += UpdateElement(identImp, "DENUMIRE", GetVal(date, "subA_DENUMIRE", ""));
-            updated += UpdateElement(identImp, "cifR", GetVal(date, "subA_cif", ""));
-        }
-        
-        // SUB2 - Declarant
-        var sub2 = form1.Element("sub2");
-        if (sub2 != null)
-        {
-            updated += UpdateElement(sub2, "Nume", GetVal(date, "sub2_Nume", ""));
-            updated += UpdateElement(sub2, "Prenume", GetVal(date, "sub2_Prenume", ""));
-            updated += UpdateElement(sub2, "Functia", GetVal(date, "sub2_Functia", ""));
-        }
-        
-        Console.WriteLine($"      Actualizate {updated} câmpuri.");
-        
-        // Salvează XFA modificat
-        xfa.SetDomDocument(xDoc);
-        xfa.Write(pdfDoc);
-        
-        pdfDoc.Close();
+        Console.WriteLine("EROARE: Nu s-a găsit XFA!");
+        return;
     }
     
-    Console.WriteLine($"      Salvat: {fisierTemp}");
+    Console.WriteLine("      XFA găsit. Append mode activ.");
     
-    // 4. DESCHIDE CU ACROBAT ȘI APASĂ VALIDARE
-    Console.WriteLine("\n[4/5] Deschid cu Adobe Acrobat și apăs VALIDARE...\n");
+    var domDoc = xfa.GetDomDocument();
+    using var ms = new MemoryStream();
+    domDoc!.Save(ms);
+    ms.Position = 0;
+    var xDoc = XDocument.Load(ms);
     
-    ApasaValidareCuAcrobat(fisierTemp, fisierFinal);
+    var form1 = xDoc.Descendants("form1").FirstOrDefault();  
+    if (form1 == null) { Console.WriteLine("EROARE: Nu s-a găsit form1!"); return; }
     
-    Console.WriteLine(new string('=', 60));
-    Console.WriteLine("SUCCES COMPLET!");
-    Console.WriteLine(new string('=', 60));
-    Console.WriteLine($"\nPDF validat: {fisierFinal}");
-    Console.WriteLine("\nCâmpuri completate automat:");
-    Console.WriteLine($"  - COD_IMP: {codImpNumeric}");
-    Console.WriteLine($"  - COD_BUGETAR: {codBugetar}");
-    Console.WriteLine($"  - SCADENTA: {scadenta}");
-    Console.WriteLine($"  - SUMA: {GetVal(date, "subB_SUMA01I", "0")} lei");
-    Console.WriteLine("\nFormularul a fost VALIDAT real cu butonul din PDF!");
+    int updated = 0;
+    
+    var sub1 = form1.Element("sub1");
+    if (sub1 != null)
+    {
+        updated += UpdateElement(sub1, "tipD", tipD);
+        updated += UpdateElement(sub1, "luna_r", luna_r.ToString());
+        updated += UpdateElement(sub1, "an_r", an_r.ToString());
+        updated += UpdateOrCreate(sub1, "d_anulare", "0");
+        updated += UpdateOrCreate(sub1, "d_succ", "0");
+        updated += UpdateOrCreate(sub1, "d_dizolv", "0");
+        updated += UpdateOrCreate(sub1, "d_modif", "0");
+        string universalCode = tipD == "1" ? "D100_A300" : "D710_A300";
+        updated += UpdateOrCreate(sub1, "universalCode", universalCode);
+    }
+    
+    var subA = form1.Element("subA");
+    if (subA != null)
+    {
+        updated += UpdateElement(subA, "cif", GetVal(date, "subA_cif", ""));
+        updated += UpdateElement(subA, "DENUMIRE", GetVal(date, "subA_DENUMIRE", ""));
+        updated += UpdateElement(subA, "ADRESA", GetVal(date, "subA_ADRESA", ""));
+        updated += UpdateElement(subA, "text_telefon", GetVal(date, "subA_text_telefon", ""));
+        updated += UpdateElement(subA, "text_email", GetVal(date, "subA_text_email", ""));
+    }
+    
+    var subB = form1.Element("subB");
+    if (subB != null)
+    {
+        updated += UpdateElement(subB, "COD_IMP", codImpFull);
+        updated += UpdateOrCreate(subB, "COD_BUGETAR", codBugetar);
+        updated += UpdateOrCreate(subB, "SCADENTA", scadenta);
+        updated += UpdateOrCreate(subB, "SCADENTA2", scadenta);
+        updated += UpdateElement(subB, "SUMA01I", GetVal(date, "subB_SUMA01I", "0"));
+        updated += UpdateOrCreate(subB, "SUMA02I", "0");
+        updated += UpdateOrCreate(subB, "SUMA03I", GetVal(date, "subB_SUMA01I", "0"));
+        updated += UpdateOrCreate(subB, "SUMA04I", "0");
+    }
+    
+    updated += UpdateElement(form1, "SUMA1", GetVal(date, "SUMA1", ""));
+    updated += UpdateElement(form1, "SUMA2", GetVal(date, "SUMA2", ""));
+    updated += UpdateElement(form1, "SUMA0", GetVal(date, "SUMA0", ""));
+    
+    var identImp = form1.Element("ident_IMP");
+    if (identImp != null)
+    {
+        updated += UpdateElement(identImp, "DENUMIRE", GetVal(date, "subA_DENUMIRE", ""));
+        updated += UpdateElement(identImp, "cifR", GetVal(date, "subA_cif", ""));
+    }
+    
+    var sub2 = form1.Element("sub2");
+    if (sub2 != null)
+    {
+        updated += UpdateElement(sub2, "Nume", GetVal(date, "sub2_Nume", ""));
+        updated += UpdateElement(sub2, "Prenume", GetVal(date, "sub2_Prenume", ""));
+        updated += UpdateElement(sub2, "Functia", GetVal(date, "sub2_Functia", ""));
+    }
+    
+// adauga xml ca attachment in PDF (daca exista deja, se va suprascrie la salvare)    
+    byte[] xmlBytes = Encoding.UTF8.GetBytes(xmlD100);
+    var fileSpec = PdfFileSpec.CreateEmbeddedFileSpec(
+        pdfDoc, 
+        xmlBytes, 
+        xmlFileName,   
+        xmlFileName, 
+        new PdfName("application/xml"), 
+        null, 
+        null);
+
+
+
+    
+    pdfDoc.AddFileAttachment(xmlFileName, fileSpec);
+    Console.WriteLine($"      Atașat: {xmlFileName}");
+    
+
+    //scriu inapoi in PDF
+    xfa.SetDomDocument(xDoc);
+    xfa.Write(pdfDoc);
+    pdfDoc.Close();
+    
+  
 }
 catch (Exception ex)
 {
     Console.WriteLine($"\nEROARE: {ex.Message}\n{ex.StackTrace}");
 }
 
-// === APASĂ VALIDARE CU UI AUTOMATION ===
-void ApasaValidareCuAcrobat(string pdfInput, string pdfOutput)
-{
-    // Folosim PowerShell cu UI Automation pentru a:
-    // 1. Deschide PDF în Adobe Reader/Acrobat
-    // 2. Folosi UI Automation pentru a găsi butonul VALIDARE și a-l apăsa
-    // 3. Salva și închide
-    
-    string psScript = $@"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-
-# Copiază fișierul
-Copy-Item -Path '{pdfInput}' -Destination '{pdfOutput}' -Force
-
-# Deschide PDF-ul
-Start-Process '{pdfOutput}'
-Write-Host 'PDF deschis, aștept încărcarea...'
-Start-Sleep -Seconds 4
-
-# Import Windows API pentru click
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {{
-    [DllImport(""user32.dll"")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-    
-    [DllImport(""user32.dll"")]
-    public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
-    
-    [DllImport(""user32.dll"")]
-    public static extern bool SetCursorPos(int X, int Y);
-    
-    [DllImport(""user32.dll"")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-    
-    public const int MOUSEEVENTF_LEFTDOWN = 0x02;
-    public const int MOUSEEVENTF_LEFTUP = 0x04;
-}}
-
-public struct RECT {{
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-}}
-'@
-
-# Găsește fereastra Adobe
-$adobe = Get-Process | Where-Object {{ 
-    $_.MainWindowTitle -like '*D100*' -or 
-    $_.MainWindowTitle -like '*VALIDAT*' -or
-    $_.MainWindowTitle -like '*Adobe*' -or 
-    $_.MainWindowTitle -like '*Acrobat*' -or
-    $_.MainWindowTitle -like '*.pdf*'
-}} | Select-Object -First 1
-
-if ($adobe -and $adobe.MainWindowHandle -ne [IntPtr]::Zero) {{
-    Write-Host ""Găsit: $($adobe.ProcessName) - $($adobe.MainWindowTitle)""
-    
-    # Aduce în prim-plan
-    [Win32]::SetForegroundWindow($adobe.MainWindowHandle)
-    Start-Sleep -Milliseconds 500
-    
-    # Obține poziția ferestrei
-    $rect = New-Object RECT
-    [Win32]::GetWindowRect($adobe.MainWindowHandle, [ref]$rect)
-    
-    $winWidth = $rect.Right - $rect.Left
-    $winHeight = $rect.Bottom - $rect.Top
-    
-    Write-Host ""Fereastră: $($rect.Left),$($rect.Top) - $winWidth x $winHeight""
-    
-    # Butonul VALIDARE este aproximativ la:
-    # x = 123.825mm din stânga paginii (dar pagina e centrată în fereastră)
-    # Pentru un form A4 (210mm lățime) în fereastră, calculăm poziția relativă
-    # Butonul e la ~60% din lățimea paginii, ~45% din înălțimea paginii (în secțiunea de jos)
-    
-    # Estimare coordonate relative pentru buton (trebuie ajustate)
-    # Butonul VALIDARE e galben, mare, în partea de jos a primei pagini
-    $btnX = $rect.Left + [int]($winWidth * 0.55)  # 55% din lățime
-    $btnY = $rect.Top + [int]($winHeight * 0.82)   # 82% din înălțime (partea de jos)
-    
-    Write-Host ""Click la: $btnX, $btnY""
-    
-    # Click pe buton
-    [Win32]::SetCursorPos($btnX, $btnY)
-    Start-Sleep -Milliseconds 200
-    [Win32]::mouse_event([Win32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    [Win32]::mouse_event([Win32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    
-    Write-Host 'Click trimis, aștept validarea...'
-    Start-Sleep -Seconds 3
-    
-    # Verifică dacă apare dialog de succes/eroare și închide-l
-    [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
-    Start-Sleep -Seconds 1
-    
-    # Salvează: Ctrl+S
-    [System.Windows.Forms.SendKeys]::SendWait('^s')
-    Write-Host 'Salvare...'
-    Start-Sleep -Seconds 2
-    
-    # Confirmă dacă apare dialog
-    [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
-    Start-Sleep -Seconds 1
-    
-    # Închide: Ctrl+W 
-    [System.Windows.Forms.SendKeys]::SendWait('^w')
-    Start-Sleep -Milliseconds 500
-    
-    # Confirmă închidere fără salvare dacă întreabă
-    [System.Windows.Forms.SendKeys]::SendWait('n')
-    
-    Write-Host 'VALIDARE completă!'
-}} else {{
-    Write-Host 'EROARE: Nu am găsit fereastra Adobe Reader/Acrobat!'
-    Write-Host 'Procese disponibile:'
-    Get-Process | Where-Object {{ $_.MainWindowTitle -ne '' }} | Select-Object ProcessName, MainWindowTitle | Format-Table
-}}
-";
-    
-    // Salvează scriptul
-    string psPath = Path.Combine(Path.GetDirectoryName(pdfInput)!, "_validare.ps1");
-    File.WriteAllText(psPath, psScript, Encoding.UTF8);
-    
-    Console.WriteLine("      Script UI Automation creat.");
-    Console.WriteLine("      Lansez Adobe Reader...\n");
-    Console.WriteLine("      ⚠️  NU atingeți mouse-ul sau tastatura în următoarele 15 secunde!\n");
-    
-    // Execută PowerShell
-    var psi = new ProcessStartInfo
-    {
-        FileName = "powershell.exe",
-        Arguments = $"-ExecutionPolicy Bypass -File \"{psPath}\"",
-        UseShellExecute = false,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        CreateNoWindow = false
-    };
-    
-    using var proc = Process.Start(psi);
-    proc?.WaitForExit(30000);
-    
-    string output = proc?.StandardOutput.ReadToEnd() ?? "";
-    string error = proc?.StandardError.ReadToEnd() ?? "";
-    
-    if (!string.IsNullOrEmpty(output))
-        Console.WriteLine($"      {output.Replace("\n", "\n      ")}");
-    if (!string.IsNullOrEmpty(error))
-        Console.WriteLine($"      EROARE: {error}");
-    
-    // Cleanup
-    try { File.Delete(psPath); } catch { }
-}
-
-// === FUNCȚII HELPER ===
+//modifica un element 
 
 int UpdateElement(XElement parent, string name, string value)
 {
@@ -495,6 +344,9 @@ int UpdateElement(XElement parent, string name, string value)
     if (el != null && !string.IsNullOrEmpty(value)) { el.Value = value; return 1; }
     return 0;
 }
+
+
+//creeaza elementul daca nu exista
 
 int UpdateOrCreate(XElement parent, string name, string value)
 {
@@ -510,7 +362,80 @@ string GetVal(Dictionary<string, object> d, string k, string def)
     return d.TryGetValue(k, out var v) && v != null ? v.ToString() ?? def : def;
 }
 
-// === CALCUL SCADENȚĂ ===
+string EscapeXml(string s)
+{
+    if (string.IsNullOrEmpty(s)) return "";
+    return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
+            .Replace("\"", "&quot;").Replace("'", "&apos;");
+}
+
+string GenereazaXmlD100(Dictionary<string, object> date, string codOblig, string codBugetar, string scadenta, int luna, int an, string tipD)
+{
+    // construiesc XML manual
+    var sb = new StringBuilder();
+    
+    string tagRoot = tipD == "1" ? "declaratie100" : "declaratie710";
+    string xmlns = tipD == "1" 
+        ? "mfp:anaf:dgti:d100:declaratie:v2" 
+        : "mfp:anaf:dgti:d710:declaratie:v2";
+    string xsd = tipD == "1" ? "D100.xsd" : "D710.xsd";
+    
+    sb.AppendLine("<?xml version=\"1.0\"?>");
+    sb.Append($"<{tagRoot}");
+    sb.Append($" luna=\"{luna:D2}\"");
+    sb.Append($" an=\"{an}\"");
+    sb.Append($" d_anulare=\"0\"");
+    sb.Append($" d_succ=\"0\"");
+    sb.Append($" d_dizolv=\"0\"");
+    sb.Append($" d_modif=\"0\"");
+    
+    sb.Append($" nume_declar=\"{EscapeXml(GetVal(date, "sub2_Nume", ""))}\"");
+    sb.Append($" prenume_declar=\"{EscapeXml(GetVal(date, "sub2_Prenume", ""))}\"");
+    sb.Append($" functie_declar=\"{EscapeXml(GetVal(date, "sub2_Functia", ""))}\"");
+    
+    sb.Append($" cui=\"{EscapeXml(GetVal(date, "subA_cif", ""))}\"");
+    sb.Append($" den=\"{EscapeXml(GetVal(date, "subA_DENUMIRE", ""))}\"");
+    sb.Append($" adresa=\"{EscapeXml(GetVal(date, "subA_ADRESA", ""))}\"");
+    sb.Append($" telefon=\"{EscapeXml(GetVal(date, "subA_text_telefon", ""))}\"");
+    sb.Append($" mail=\"{EscapeXml(GetVal(date, "subA_text_email", ""))}\"");
+    
+    sb.Append($" totalPlata_A=\"{GetVal(date, "SUMA1", "0")}\"");
+    
+    sb.Append($" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"");
+    sb.Append($" xsi:schemaLocation=\"{xmlns} {xsd}\"");
+    sb.Append($" xmlns=\"{xmlns}\">");
+    sb.AppendLine();
+    
+    string suma = GetVal(date, "subB_SUMA01I", "0");
+    sb.Append("\t<obligatie");
+    sb.Append($" cod_oblig=\"{codOblig}\"");
+    sb.Append($" cod_bugetar=\"{codBugetar}\"");
+    sb.Append($" scadenta=\"{scadenta}\"");
+    
+    if (tipD == "1")
+    {
+        sb.Append($" suma_dat=\"{suma}\"");
+        sb.Append($" suma_ded=\"0\"");
+        sb.Append($" suma_plata=\"{suma}\"");
+        sb.Append($" suma_rest=\"0\"");
+    }
+    else
+    {
+        sb.Append($" suma_dat_I=\"{suma}\"");
+        sb.Append($" suma_ded_I=\"0\"");
+        sb.Append($" suma_plata_I=\"{suma}\"");
+        sb.Append($" suma_rest_I=\"0\"");
+    }
+    
+    sb.AppendLine(" />");
+    
+    sb.AppendLine($"</{tagRoot}>");
+    
+    return sb.ToString();
+}
+
+
+//calculez scadenta in functie de modelul obligatiei fiscale, luna si anul de referinta (luna_r, an_r)
 string CalculeazaScadenta(string model, int luna_r, int an_r)
 {
     int refMonth = luna_r - 1;
