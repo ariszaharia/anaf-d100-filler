@@ -1,18 +1,31 @@
 {
-  "sub1_tipD": "2",
+  "sub1_tipD": "1",
   "sub1_luna_r": "3",
   "sub1_an_r": "2026",
-  "subA_cif": "12345678",
-  "subA_DENUMIRE": "SC EXEMPLU SRL",
-  "subA_ADRESA": "Str. Exemplu Nr. 1, București",
+  "sub1_d_anulare": "0",
+  "sub1_d_succ": "0",
+  "sub1_d_dizolv": "0",
+  "sub1_d_modif": "0",
+  "sub1_d_trim": "0",
+  "sub1_d_energie": "0",
+  "sub1_d_bonif": "0",
+  "sub1_d_nInf": "0",
+  "subA_cif": "12345674",
+  "subA_DENUMIRE": "SC EXEMPLU TEHNIC SRL",
+  "subA_ADRESA": "Str. Victoriei Nr. 10, Sector 1, Bucuresti",
   "subA_text_telefon": "0212345678",
-  "subA_text_email": "contact@exemplu.ro",
-  "subB_COD_IMP": "103--Impozit pe profit/plati anticipate in contul imp.pe profit anual dat.de PJ romane sau cu sediul social in Romania (altele decat pct.1)",
-  "subB_SUMA01I": "1000",
-  "SUMA1": "1000",
-  "SUMA2": "1000",
-  "SUMA0": "0",
-  "sub2_Nume": "EXEMPLU",
-  "sub2_Prenume": "ION",
-  "sub2_Functia": "Administrator"
+  "subA_text_email": "contact@exemplutehnic.ro",
+  "sub2_Nume": "IONESCU",
+  "sub2_Prenume": "MARIA",
+  "sub2_Functia": "Administrator",
+  "obligatii": [
+    {
+      "COD_IMP": "103--Impozit pe profit/plati anticipate",
+      "SUMA01I": "1500"
+    },
+    {
+      "COD_IMP": "605--Taxa pe valoarea adăugată",
+      "SUMA01I": "2200"
+    }
+  ]
 }
