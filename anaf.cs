@@ -12,7 +12,7 @@ using iText.Kernel.Pdf.Filespec;
 
 string fisierPdf = Path.GetFullPath("decl100.pdf");
 string fisierJson = "date_declaratie.json";
-string fisierOutput = Path.GetFullPath($"D100_COMPLETAT_{DateTime.Now:yyyyMMdd_HHmmss}.pdf");
+string fisierOutput = Path.GetFullPath($"D100_Completat_{DateTime.Now:yyyyMMdd_HHmmss}.pdf");
 
 
 // simulare buton creanta fiscala (toate variantele posbile)
@@ -146,7 +146,6 @@ Dictionary<string, object> date;
 
 if (File.Exists(fisierJson))
 {
-    Console.WriteLine($"[1/5] Citesc datele din {fisierJson}...");
     var jsonText = File.ReadAllText(fisierJson);
     date = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonText) ?? new();
 }
@@ -164,11 +163,6 @@ else
         { "subA_ADRESA", "Str. Test Nr. 1, București" },
         { "subA_text_telefon", "0212345678" },
         { "subA_text_email", "test@test.ro" },
-        { "subB_COD_IMP", "103--Impozit pe profit/plati anticipate" },
-        { "subB_SUMA01I", "2500" },
-        { "SUMA1", "2500" },
-        { "SUMA2", "2500" },
-        { "SUMA0", "0" },
         { "sub2_Nume", "POPESCU" },
         { "sub2_Prenume", "ION" },
         { "sub2_Functia", "Administrator" },
@@ -176,39 +170,67 @@ else
     File.WriteAllText(fisierJson, JsonSerializer.Serialize(date, new JsonSerializerOptions { WriteIndented = true }));
 }
 
-
-
-// extrag datele din json (cod impozit, luna, an, tip declaratie)
-
-string codImpFull = GetVal(date, "subB_COD_IMP", "");
+// Extrag datele comune din json
 int luna_r = int.Parse(GetVal(date, "sub1_luna_r", "1")); 
 int an_r = int.Parse(GetVal(date, "sub1_an_r", "2026"));
 string tipD = GetVal(date, "sub1_tipD", "1");
 
-string codImpNumeric = codImpFull.Split('-')[0].Trim();
+// Extrag array-ul de obligatii din JSON
+var listaObligatii = new List<(string CodImpFull, string CodImpNumeric, string CodBugetar, string Scadenta, string NrJustificativ, decimal Suma)>();
 
-
-
-string codBugetar = "";
-string scadenta = "";
-string model = "";
-
-
-// simulare buton creanta fiscala
-if (obligatii.TryGetValue(codImpNumeric, out var ob))
+if (date.TryGetValue("obligatii", out var obligatiiObj) && obligatiiObj is JsonElement jsonArr && jsonArr.ValueKind == JsonValueKind.Array)
 {
-    codBugetar = ob.CodBugetar;
-    model = ob.Model;
-
-    //calc scadenta in functie de model, luna_r, an_r
-    scadenta = CalculeazaScadenta(model, luna_r, an_r);
-    
-    Console.WriteLine($"      COD_BUGETAR: {codBugetar}");
-    Console.WriteLine($"      SCADENTA: {scadenta}");
+    foreach (var item in jsonArr.EnumerateArray())
+    {
+        string codImpFull = item.TryGetProperty("COD_IMP", out var ci) ? ci.GetString() ?? "" : "";
+        string sumaStr = item.TryGetProperty("SUMA01I", out var si) ? si.GetString() ?? "0" : "0";
+        decimal suma = decimal.TryParse(sumaStr, out var s) ? s : 0;
+        
+        string codImpNumeric = codImpFull.Split('-')[0].Trim();
+        string codBugetar = "";
+        string scadenta = "";
+        string nrJustificativ = "";
+        
+        if (obligatii.TryGetValue(codImpNumeric, out var ob))
+        {
+            codBugetar = ob.CodBugetar;
+            scadenta = CalculeazaScadenta(ob.Model, luna_r, an_r);
+            nrJustificativ = GenereazaNrJustificativ(codImpNumeric, luna_r, an_r, scadenta);
+        }
+        
+        listaObligatii.Add((codImpFull, codImpNumeric, codBugetar, scadenta, nrJustificativ, suma));
+        Console.WriteLine($"  + Obligatie: {codImpNumeric} | Suma: {suma} | Scadenta: {scadenta}");
+    }
 }
-//generez XML cu datele din json
+else
+{
+    // Fallback pt format vechi (o singura obligatie)
+    string codImpFull = GetVal(date, "subB_COD_IMP", "");
+    string sumaStr = GetVal(date, "subB_SUMA01I", "0");
+    decimal suma = decimal.TryParse(sumaStr, out var s) ? s : 0;
+    string codImpNumeric = codImpFull.Split('-')[0].Trim();
+    
+    if (obligatii.TryGetValue(codImpNumeric, out var ob))
+    {
+        string scadenta = CalculeazaScadenta(ob.Model, luna_r, an_r);
+        string nrJustificativ = GenereazaNrJustificativ(codImpNumeric, luna_r, an_r, scadenta);
+        listaObligatii.Add((codImpFull, codImpNumeric, ob.CodBugetar, scadenta, nrJustificativ, suma));
+    }
+}
 
-string xmlD100 = GenereazaXmlD100(date, codImpNumeric, codBugetar, scadenta, luna_r, an_r, tipD);
+if (listaObligatii.Count == 0)
+{
+    Console.WriteLine("EROARE: Nu s-au găsit obligații în JSON!");
+    return;
+}
+
+// Calculez totaluri
+decimal totalPlata = listaObligatii.Sum(o => o.Suma);
+Console.WriteLine($"\nTotal obligații: {listaObligatii.Count} | Total de plată: {totalPlata} lei");
+
+//generez XML cu datele din json (acum cu multiple obligatii)
+
+string xmlD100 = GenereazaXmlD100Multi(date, listaObligatii, luna_r, an_r, tipD, totalPlata);
 string xmlFileName = tipD == "1" ? "D100.xml" : "D710.xml";
 
 //salvare XML local pt debug ('xmlD100')
@@ -229,28 +251,29 @@ try
     using var pdfDoc = new PdfDocument(reader, writer, stampProps); //sursa , destinatie, reguli scriere
     
     var acroForm = PdfAcroForm.GetAcroForm(pdfDoc, false);
+
+    //extrage xfa din PDF (daca exista) - daca nu exista, inseamna ca PDF-ul nu e compatibil sau e corupt, deci opresc procesul
     var xfa = acroForm?.GetXfaForm();
     
     if (xfa == null || !xfa.IsXfaPresent())
     {
-        Console.WriteLine("EROARE: Nu s-a găsit XFA!");
         return;
     }
-    
-    Console.WriteLine("      XFA găsit. Append mode activ.");
-    
+     
     var domDoc = xfa.GetDomDocument();
     using var ms = new MemoryStream();
     domDoc!.Save(ms);
     ms.Position = 0;
     var xDoc = XDocument.Load(ms);
     
+    //toata strcutura e in form1 deci daca nu exista -> formular invalid
     var form1 = xDoc.Descendants("form1").FirstOrDefault();  
     if (form1 == null) { Console.WriteLine("EROARE: Nu s-a găsit form1!"); return; }
     
     int updated = 0;
     
     var sub1 = form1.Element("sub1");
+    // actualizez elementele comune (luna, an, tipD) + adaug elemente noi daca nu exista (d_anulare, d_succ, d_dizolv, d_modif, universalCode)
     if (sub1 != null)
     {
         updated += UpdateElement(sub1, "tipD", tipD);
@@ -265,6 +288,7 @@ try
     }
     
     var subA = form1.Element("subA");
+    // actualizez elementele din subA (cif, denumire, adresa, telefon, email)
     if (subA != null)
     {
         updated += UpdateElement(subA, "cif", GetVal(date, "subA_cif", ""));
@@ -274,22 +298,46 @@ try
         updated += UpdateElement(subA, "text_email", GetVal(date, "subA_text_email", ""));
     }
     
-    var subB = form1.Element("subB");
-    if (subB != null)
+    // Procesez fiecare obligatie - primul subB exista deja, urmatoarele le clonam
+    var subBOriginal = form1.Element("subB");
+    XElement? subBRef = subBOriginal; // referinta pentru insertie
+    
+    for (int i = 0; i < listaObligatii.Count; i++)
     {
-        updated += UpdateElement(subB, "COD_IMP", codImpFull);
-        updated += UpdateOrCreate(subB, "COD_BUGETAR", codBugetar);
-        updated += UpdateOrCreate(subB, "SCADENTA", scadenta);
-        updated += UpdateOrCreate(subB, "SCADENTA2", scadenta);
-        updated += UpdateElement(subB, "SUMA01I", GetVal(date, "subB_SUMA01I", "0"));
+        var ob = listaObligatii[i];
+        XElement subB;
+        
+        if (i == 0)
+        {
+            // Prima obligatie - folosim subB existent
+            subB = subBOriginal!;
+        }
+        else
+        {
+            // Obligatii aditionale - clonam subB si-l inseram dupa cel precedent
+            subB = new XElement(subBOriginal!);
+            subBRef!.AddAfterSelf(subB);
+            Console.WriteLine($"  + Adaugat subB[{i}] pentru obligatia {ob.CodImpNumeric}");
+        }
+        
+        // Completez datele in subB
+        updated += UpdateElement(subB, "COD_IMP", ob.CodImpFull);
+        updated += UpdateOrCreate(subB, "COD_BUGETAR", ob.CodBugetar);
+        updated += UpdateOrCreate(subB, "SCADENTA", ob.Scadenta);
+        updated += UpdateOrCreate(subB, "SCADENTA2", ob.Scadenta);
+        updated += UpdateOrCreate(subB, "NR_JUSTIFICATIV", ob.NrJustificativ); // obligatoriu pt valid1()
+        updated += UpdateElement(subB, "SUMA01I", ob.Suma.ToString("0"));
         updated += UpdateOrCreate(subB, "SUMA02I", "0");
-        updated += UpdateOrCreate(subB, "SUMA03I", GetVal(date, "subB_SUMA01I", "0"));
+        updated += UpdateOrCreate(subB, "SUMA03I", ob.Suma.ToString("0"));
         updated += UpdateOrCreate(subB, "SUMA04I", "0");
+        
+        subBRef = subB; // urmatorul clone se insereaza dupa acesta
     }
     
-    updated += UpdateElement(form1, "SUMA1", GetVal(date, "SUMA1", ""));
-    updated += UpdateElement(form1, "SUMA2", GetVal(date, "SUMA2", ""));
-    updated += UpdateElement(form1, "SUMA0", GetVal(date, "SUMA0", ""));
+    // Actualizez totalurile (SUMA1 = total de plata, SUMA2 = total de restituit)
+    updated += UpdateElement(form1, "SUMA1", totalPlata.ToString("0"));
+    updated += UpdateElement(form1, "SUMA2", "0");
+    updated += UpdateElement(form1, "SUMA0", "0");
     
     var identImp = form1.Element("ident_IMP");
     if (identImp != null)
@@ -317,9 +365,6 @@ try
         null, 
         null);
 
-
-
-    
     pdfDoc.AddFileAttachment(xmlFileName, fileSpec);
     Console.WriteLine($"      Atașat: {xmlFileName}");
     
@@ -329,14 +374,13 @@ try
     xfa.Write(pdfDoc);
     pdfDoc.Close();
     
-  
 }
 catch (Exception ex)
 {
     Console.WriteLine($"\nEROARE: {ex.Message}\n{ex.StackTrace}");
 }
 
-//modifica un element 
+//modifica un element
 
 int UpdateElement(XElement parent, string name, string value)
 {
@@ -369,9 +413,9 @@ string EscapeXml(string s)
             .Replace("\"", "&quot;").Replace("'", "&apos;");
 }
 
-string GenereazaXmlD100(Dictionary<string, object> date, string codOblig, string codBugetar, string scadenta, int luna, int an, string tipD)
+// Generare XML cu multiple obligatii
+string GenereazaXmlD100Multi(Dictionary<string, object> date, List<(string CodImpFull, string CodImpNumeric, string CodBugetar, string Scadenta, string NrJustificativ, decimal Suma)> listaOb, int luna, int an, string tipD, decimal totalPlata)
 {
-    // construiesc XML manual
     var sb = new StringBuilder();
     
     string tagRoot = tipD == "1" ? "declaratie100" : "declaratie710";
@@ -399,41 +443,44 @@ string GenereazaXmlD100(Dictionary<string, object> date, string codOblig, string
     sb.Append($" telefon=\"{EscapeXml(GetVal(date, "subA_text_telefon", ""))}\"");
     sb.Append($" mail=\"{EscapeXml(GetVal(date, "subA_text_email", ""))}\"");
     
-    sb.Append($" totalPlata_A=\"{GetVal(date, "SUMA1", "0")}\"");
+    sb.Append($" totalPlata_A=\"{totalPlata:0}\"");
     
     sb.Append($" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"");
     sb.Append($" xsi:schemaLocation=\"{xmlns} {xsd}\"");
     sb.Append($" xmlns=\"{xmlns}\">");
     sb.AppendLine();
     
-    string suma = GetVal(date, "subB_SUMA01I", "0");
-    sb.Append("\t<obligatie");
-    sb.Append($" cod_oblig=\"{codOblig}\"");
-    sb.Append($" cod_bugetar=\"{codBugetar}\"");
-    sb.Append($" scadenta=\"{scadenta}\"");
-    
-    if (tipD == "1")
+    // Generez fiecare obligatie
+    foreach (var ob in listaOb)
     {
-        sb.Append($" suma_dat=\"{suma}\"");
-        sb.Append($" suma_ded=\"0\"");
-        sb.Append($" suma_plata=\"{suma}\"");
-        sb.Append($" suma_rest=\"0\"");
+        sb.Append("\t<obligatie");
+        sb.Append($" cod_oblig=\"{ob.CodImpNumeric}\"");
+        sb.Append($" cod_bugetar=\"{ob.CodBugetar}\"");
+        sb.Append($" scadenta=\"{ob.Scadenta}\"");
+        if (!string.IsNullOrEmpty(ob.NrJustificativ))
+            sb.Append($" nr_evid=\"{ob.NrJustificativ}\"");
+        
+        string sumaStr = ob.Suma.ToString("0");
+        if (tipD == "1")
+        {
+            sb.Append($" suma_dat=\"{sumaStr}\"");
+            sb.Append($" suma_ded=\"0\"");
+            sb.Append($" suma_plata=\"{sumaStr}\"");
+            sb.Append($" suma_rest=\"0\"");
+        }
+        else
+        {
+            sb.Append($" suma_dat_I=\"{sumaStr}\"");
+            sb.Append($" suma_ded_I=\"0\"");
+            sb.Append($" suma_plata_I=\"{sumaStr}\"");
+            sb.Append($" suma_rest_I=\"0\"");
+        }
+        sb.AppendLine(" />");
     }
-    else
-    {
-        sb.Append($" suma_dat_I=\"{suma}\"");
-        sb.Append($" suma_ded_I=\"0\"");
-        sb.Append($" suma_plata_I=\"{suma}\"");
-        sb.Append($" suma_rest_I=\"0\"");
-    }
-    
-    sb.AppendLine(" />");
     
     sb.AppendLine($"</{tagRoot}>");
-    
     return sb.ToString();
 }
-
 
 //calculez scadenta in functie de modelul obligatiei fiscale, luna si anul de referinta (luna_r, an_r)
 string CalculeazaScadenta(string model, int luna_r, int an_r)
@@ -532,7 +579,9 @@ string CalculeazaScadenta(string model, int luna_r, int an_r)
             endYear = refYear;
             if (endMonth > 11) { endMonth -= 12; endYear++; }
             scad = new DateTime(endYear, endMonth + 1, 25);
-            break;
+            break;      
+        
+                      
             
         case "AN_115":
         case "AN_125":
@@ -557,4 +606,34 @@ string CalculeazaScadenta(string model, int luna_r, int an_r)
     }
     
     return scad.ToString("dd.MM.yyyy");
+}
+
+// Generare NR_JUSTIFICATIV - echivalent pune_nrev() din XFA
+// Format: "10" + cod(3) + "01" + luna_ref(2) + an_ref(2) + scad_zi(2) + scad_luna(2) + scad_an(2) + "0000" + cifra_control(2)
+string GenereazaNrJustificativ(string codOblig, int luna, int an, string scadenta)
+{
+    if (string.IsNullOrEmpty(scadenta) || string.IsNullOrEmpty(codOblig)) return "";
+
+    // parse scadenta dd.MM.yyyy
+    var parts = scadenta.Split('.');
+    if (parts.Length != 3) return "";
+
+    string scadZi   = parts[0].PadLeft(2, '0');
+    string scadLuna = parts[1].PadLeft(2, '0');
+    string scadAn   = parts[2].Substring(2, 2); // ultimele 2 cifre din an
+
+    string lunaRef = luna.ToString().PadLeft(2, '0');
+    string anRef   = an.ToString().Substring(2, 2); // ultimele 2 cifre din an
+    string cod3    = codOblig.PadLeft(3, '0').Substring(0, 3);
+
+    // exact acelasi format ca in XFA: nrev1 = "10" + oblig1 + "01" + refMonth2 + refYear2 + scad2 + "0" + "000"
+    string nrev = $"10{cod3}01{lunaRef}{anRef}{scadZi}{scadLuna}{scadAn}0000";
+
+    // cifra de control = ultimele 2 cifre din suma tuturor cifrelor (ca in XFA)
+    int suma = 0;
+    foreach (char c in nrev)
+        if (char.IsDigit(c)) suma += c - '0';
+
+    string cifraControl = (suma % 100).ToString().PadLeft(2, '0');
+    return nrev + cifraControl;
 }
